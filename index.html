@@ -495,7 +495,7 @@
           </div>
           <div class="board-route">
             <span class="route-caption">どこへ</span>
-            <input id="toInput" class="station-input" value="" placeholder="駅名を入力" maxlength="10" aria-label="目的地に一番近い駅" />
+            <input id="toInput" class="station-input" value="" placeholder="駅名・スポット名" maxlength="40" aria-label="目的地(駅名またはスポット名)" />
           </div>
           <div class="board-timer">
             <!-- 目的地までの徒歩分も裏側の補助データとして使うだけで、画面には出さない -->
@@ -508,7 +508,7 @@
           </div>
         </div>
         <p class="geo-status" id="geoStatus"></p>
-        <p class="dest-hint">目的地に一番近い駅名を入れてください(このデータでは京都行きの区間内の駅のみ計算できます)。</p>
+        <p class="dest-hint" id="destHint">駅名でも、「京都水族館」のようなスポット名でも入れられます(スポットは一番近い駅から歩く時間も含めて計算します)。</p>
         <button class="cta" id="toGrid" disabled>候補を見る</button>
       </section>
 
@@ -690,6 +690,8 @@
   const toInput = document.getElementById("toInput");
   const toWalkInput = document.getElementById("toWalkInput");
   const geoStatus = document.getElementById("geoStatus");
+  const destHint = document.getElementById("destHint");
+  const DEST_HINT_DEFAULT = destHint.textContent;
 
   // カテゴリごとの色分け(丸の色・凡例)。実写真がある丸は縁取りの色として使う。
   const CATEGORY_COLORS = {
@@ -717,6 +719,13 @@
     "長岡京": [34.9232752, 135.7002937],
     "桂川": [34.9641996, 135.7124191],
   };
+  // 目的地として選べる駅(出発駅の候補 + 西大路・京都)
+  const DEST_STATION_COORDS = Object.assign({}, STATION_COORDS, {
+    "西大路": [34.9814150, 135.7338070],
+    "京都": [34.9858490, 135.7587670],
+  });
+  // 駅からこれ以上離れたスポットは、この区間の目的地としては扱わない
+  const DEST_MAX_DISTANCE_M = 15000;
 
   let currentFeasible = [];
   let currentIndex = 0;
@@ -759,10 +768,10 @@
   const DETOUR_FACTOR = 1.3;   // 直線距離→実際の徒歩経路への補正(スポットのwalkMinと同じ考え方)
   const WALK_M_PER_MIN = 80;   // 徒歩速度の目安(分速80m)
 
-  function nearestStation(lat, lon){
+  function nearestStation(lat, lon, coords = STATION_COORDS){
     let best = null, bestDist = Infinity;
-    Object.keys(STATION_COORDS).forEach(name => {
-      const [slat, slon] = STATION_COORDS[name];
+    Object.keys(coords).forEach(name => {
+      const [slat, slon] = coords[name];
       const d = haversineMeters(lat, lon, slat, slon);
       if(d < bestDist){ bestDist = d; best = name; }
     });
@@ -799,7 +808,76 @@
     );
   }
 
-  toGridBtn.addEventListener("click", () => {
+  // ---- 目的地: 駅名でもスポット名でも受け付ける ----
+  // スポット名のときは OpenStreetMap(Nominatim)で場所を調べ、一番近い駅と
+  // そこからの徒歩時間(直線距離×1.3÷分速80m の概算)に置き換えて計算する。
+  // 見つからなければ国土地理院の住所検索も試す(住所を入れた場合用)。
+  let destInfo = null; // { query, station, walkMin, label }
+
+  function destStationName(){
+    return destInfo ? destInfo.station : normalizeStationName(toInput.value.trim());
+  }
+  function destLabel(){
+    return destInfo ? destInfo.label : (normalizeStationName(toInput.value.trim()) || "目的地");
+  }
+
+  async function geocodePlace(query){
+    // 関西(大阪〜京都)周辺を優先して探す(bounded=0 なので範囲外も候補にはなる)
+    const nominatim = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=jp&accept-language=ja" +
+      "&viewbox=135.40,35.10,135.90,34.75&bounded=0&q=" + encodeURIComponent(query);
+    const r = await fetch(nominatim);
+    if(r.ok){
+      const j = await r.json();
+      if(j[0]) return { lat: Number(j[0].lat), lon: Number(j[0].lon) };
+    }
+    const g = await fetch("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(query));
+    if(g.ok){
+      const j = await g.json();
+      if(j[0]) return { lat: j[0].geometry.coordinates[1], lon: j[0].geometry.coordinates[0] };
+    }
+    return null;
+  }
+
+  // 入力された目的地を「駅 + 徒歩分」に確定させる。計算できる状態になれば true。
+  async function resolveDestination(){
+    const raw = toInput.value.trim();
+    if(DEST_STATION_COORDS[normalizeStationName(raw)]){
+      destInfo = null;
+      toWalkInput.value = 0;
+      destHint.textContent = DEST_HINT_DEFAULT;
+      return true;
+    }
+    if(destInfo && destInfo.query === raw) return true; // 同じ入力は調べ直さない
+    destHint.textContent = "「" + raw + "」の場所を調べています…";
+    let place;
+    try {
+      place = await geocodePlace(raw);
+    } catch(e){
+      destHint.textContent = "場所の検索に失敗しました(通信状況を確認してください)。駅名なら検索なしで計算できます。";
+      return false;
+    }
+    if(!place){
+      destHint.textContent = "「" + raw + "」が見つかりませんでした。正式名称や住所、または駅名で入れてみてください。";
+      return false;
+    }
+    const { name, distanceM, walkMin } = nearestStation(place.lat, place.lon, DEST_STATION_COORDS);
+    if(distanceM > DEST_MAX_DISTANCE_M){
+      destHint.textContent = "「" + raw + "」は摂津富田〜京都の駅から離れすぎているため計算できません。";
+      return false;
+    }
+    destInfo = { query: raw, station: name, walkMin, label: raw };
+    toWalkInput.value = walkMin;
+    destHint.textContent = "「" + raw + "」は" + name + "駅から徒歩約" + walkMin + "分として計算します" +
+      (walkMin > 30 ? "(駅から遠いので、実際はバスなどが必要かもしれません)。" : "。") +
+      " 位置データ © OpenStreetMap contributors";
+    return true;
+  }
+
+  toGridBtn.addEventListener("click", async () => {
+    toGridBtn.disabled = true;
+    const ok = await resolveDestination();
+    updateCtaEnabled();
+    if(!ok) return;
     renderGrid();
     switchView("grid");
   });
@@ -894,7 +972,7 @@
 
   function currentRoute(){
     const from = normalizeStationName(fromInput.value.trim()) || "高槻";
-    const to = normalizeStationName(toInput.value.trim()) || "京都";
+    const to = destInfo ? destInfo.label : (normalizeStationName(toInput.value.trim()) || "京都");
     return from + "→" + to;
   }
 
@@ -993,7 +1071,7 @@
     // 判定できない(時刻表データが無い駅)候補は、間に合わないと確定していないので残す。
     computeAutoBoardTime(); // 候補を出す瞬間の「今」を基準に乗車時刻を計算し直す
     const fromStation = normalizeStationName(fromInput.value.trim());
-    const toStation = normalizeStationName(toInput.value.trim());
+    const toStation = destStationName();
     const boardTime = boardTimeStr;
     const deadlineTime = deadlineInput.value;
     const destWalkMin = Number(toWalkInput.value) || 0; // 目的地の最寄り駅からさらに歩く分(徒歩数分)
@@ -1160,7 +1238,8 @@
     }
 
     // 空き時間 = 到着目標 − バッファー(15分) − 実際に着く時刻(徒歩往復+45分滞在込み)
-    const toLabel = normalizeStationName(toInput.value.trim()) || "目的地";
+    const toLabel = destLabel();
+    const toArrivePhrase = destInfo ? toLabel : toLabel + "駅"; // スポット名の後ろには「駅」を付けない
     noteLayover.innerHTML = "";
     const addNoteLine = text => {
       const li = document.createElement("li");
@@ -1201,7 +1280,7 @@
         }
         addNoteLine(toLabel + "到着時刻: " + arriveTimeStr + "(到着目標まで約" + mins + "分の余裕)");
       } else {
-        addNoteLine(toLabel + "駅に着くのが" + arriveTimeStr + "になり、到着目標に間に合いません(約" + Math.abs(mins) + "分足りない)");
+        addNoteLine(toArrivePhrase + "に着くのが" + arriveTimeStr + "になり、到着目標に間に合いません(約" + Math.abs(mins) + "分足りない)");
       }
     } else if(plan){
       if(plan.returnDepMin != null){
@@ -1594,7 +1673,7 @@
   // 「現在時刻+徒歩時間」をそのまま乗車時刻の目安として使う。
   function computeAutoBoardTime(){
     const fromStation = normalizeStationName(fromInput.value.trim());
-    const toStation = normalizeStationName(toInput.value.trim());
+    const toStation = destStationName();
     if(!fromStation || !toStation){
       boardTimeStr = null;
       return;
@@ -1614,7 +1693,14 @@
   }
 
   fromInput.addEventListener("input", () => { computeAutoBoardTime(); updateCtaEnabled(); });
-  toInput.addEventListener("input", () => { computeAutoBoardTime(); updateCtaEnabled(); });
+  toInput.addEventListener("input", () => {
+    // 入力が変わったら、前に調べたスポットの結果は捨てる(「候補を見る」で調べ直す)
+    destInfo = null;
+    toWalkInput.value = 0;
+    destHint.textContent = DEST_HINT_DEFAULT;
+    computeAutoBoardTime();
+    updateCtaEnabled();
+  });
 
   renderCatLegend();
   updateCtaEnabled();
