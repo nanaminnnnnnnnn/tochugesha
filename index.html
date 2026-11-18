@@ -503,9 +503,6 @@
               <span>駅からの徒歩 <input type="number" id="toWalkInput" class="time-input walk-input" min="0" max="60" step="1" value="0" aria-label="最寄り駅から目的地までの徒歩分" />分</span>
             </div>
             <div class="timer-row">
-              <span>現在時刻 <input type="time" id="nowOverrideInput" class="time-input" aria-label="現在時刻(空欄なら実際の現在時刻を使用)" /></span>
-            </div>
-            <div class="timer-row">
               <span>何時までに <input type="time" id="deadlineInput" class="time-input" aria-label="何時までに到着駅に着きたいか" /></span>
             </div>
           </div>
@@ -692,7 +689,6 @@
   const fromInput = document.getElementById("fromInput");
   const toInput = document.getElementById("toInput");
   const toWalkInput = document.getElementById("toWalkInput");
-  const nowOverrideInput = document.getElementById("nowOverrideInput");
   const geoStatus = document.getElementById("geoStatus");
 
   // カテゴリごとの色分け(丸の色・凡例)。実写真がある丸は縁取りの色として使う。
@@ -1439,23 +1435,6 @@
     return (h < 4 ? h + 24 : h) * 60 + m;
   }
 
-  // 「現在時刻」欄に入力があれば、それを「今」として扱う(乗車時刻・空き時間の計算用)。
-  // 空欄なら実際の現在時刻をそのまま使う。日付・曜日は常に実際の今日のまま
-  // (時刻表の平日/土曜/日祝の切り替えには影響しない)。
-  // ※「決定する」の実際のアラーム(departureDate)は、ブラウザの本当の時計で鳴らす必要が
-  //   あるため、ここでは上書きしない(本物の new Date() のまま)。
-  function getEffectiveNow(){
-    const real = new Date();
-    const override = nowOverrideInput ? nowOverrideInput.value : "";
-    if(override){
-      const [oh, om] = override.split(":").map(Number);
-      if(!Number.isNaN(oh) && !Number.isNaN(om)){
-        return new Date(real.getFullYear(), real.getMonth(), real.getDate(), oh, om, 0);
-      }
-    }
-    return real;
-  }
-
   function padHHMM(time){
     const [h, m] = time.split(":");
     return h.padStart(2, "0") + ":" + m.padStart(2, "0");
@@ -1488,7 +1467,7 @@
     const toIdx = LINE_INDEX[toStation];
 
     if(afterMin == null){
-      const now = getEffectiveNow();
+      const now = new Date();
       afterMin = serviceMinutes(now.getHours(), now.getMinutes()) + now.getSeconds() / 60;
     }
 
@@ -1565,7 +1544,7 @@
     // stopStationの実時刻表から、現在時刻+徒歩(earliestNowMin)以降に fromStation を
     // 出る一番早い便を求める(その駅に停まる普通・快速だけが対象になるので、高槻発の
     // 新快速・特急を誤って拾わず、快速も取りこぼさない)。
-    const now = getEffectiveNow();
+    const now = new Date();
     const earliestNowMin = serviceMinutes(now.getHours(), now.getMinutes()) + now.getSeconds() / 60 + walkToStationMin;
     const boarding = findBoardingForStop(fromStation, stopStation, earliestNowMin);
     let boardMin, arriveAtStopStationMin;
@@ -1620,7 +1599,7 @@
       boardTimeStr = null;
       return;
     }
-    const now = getEffectiveNow();
+    const now = new Date();
     const afterMin = serviceMinutes(now.getHours(), now.getMinutes()) + now.getSeconds() / 60 + walkToStationMin;
     // 「途中下車できる駅」に停まる電車の乗車時刻を出したいので、fromStationの次の
     // 実時刻表を持つ駅(高槻なら島本)の時刻表から逆算する。無ければ従来ロジック。
@@ -1636,7 +1615,6 @@
 
   fromInput.addEventListener("input", () => { computeAutoBoardTime(); updateCtaEnabled(); });
   toInput.addEventListener("input", () => { computeAutoBoardTime(); updateCtaEnabled(); });
-  nowOverrideInput.addEventListener("input", () => { computeAutoBoardTime(); });
 
   renderCatLegend();
   updateCtaEnabled();
