@@ -1,5 +1,5 @@
-// Yahoo!路線情報から JR京都線 京都・米原方面 の駅時刻表を取得し、
-// index.html の *_TIMETABLE 定数を差し替える。
+// Yahoo!路線情報から JR京都線 京都・米原方面 の駅時刻表と駅間のIC運賃を取得し、
+// index.html の *_TIMETABLE 定数と IC_FARES 定数を差し替える。
 // GitHub Actions(.github/workflows/update-timetables.yml)から定期実行される。
 //
 // 使い方:
@@ -21,6 +21,12 @@ const STATIONS = [
   { name: "桂川", constName: "KATSURAGAWA_TIMETABLE", searchName: "桂川(京都府)" },
 ];
 const KINDS = { weekday: 1, saturday: 2, sunday: 4 };
+// IC運賃を取る駅(京都寄りの順)。JRは往復同額なので、前→後の組み合わせだけ取る。
+const FARE_STATIONS = [
+  { name: "摂津富田" }, { name: "高槻" }, { name: "島本" },
+  { name: "山崎", searchName: "山崎(京都府)" }, { name: "長岡京" }, { name: "向日町" },
+  { name: "桂川", searchName: "桂川(京都府)" }, { name: "西大路" }, { name: "京都" },
+];
 const BASE = "https://transit.yahoo.co.jp";
 const DELAY_MS = 1500;
 
@@ -81,6 +87,23 @@ function parseTimetable(html){
   return out;
 }
 
+// 経路検索の1件目(IC優先)の運賃を読む。JR京都線だけで行く経路でなければ止める。
+async function fetchIcFare(a, b){
+  const q = s => encodeURIComponent(s.searchName || s.name);
+  const html = await get(`${BASE}/search/result?from=${q(a)}&to=${q(b)}&ticket=ic&expkind=1&ws=3&s=0&al=0&shin=0&ex=0&hb=0&lb=0&sr=0`);
+  const txt = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const start = txt.indexOf("IC優先：");
+  if(start < 0) throw new Error(`運賃が見つからない: ${a.name}→${b.name}`);
+  const end = txt.indexOf("ルート 2", start);
+  const seg = txt.slice(start, end > 0 ? end : start + 3000);
+  const m = seg.match(/IC優先： ([\d,]+) 円/);
+  if(!m) throw new Error(`運賃が読めない: ${a.name}→${b.name}`);
+  if(!seg.includes("ＪＲ京都線") || /阪急|京阪|地下鉄|バス|新幹線/.test(seg)){
+    throw new Error(`JR京都線だけの経路ではない: ${a.name}→${b.name}`);
+  }
+  return Number(m[1].replace(/,/g, ""));
+}
+
 function readExisting(html, constName){
   const m = html.match(new RegExp(`const ${constName} = (\\{.*\\});`));
   return m ? JSON.parse(m[1]) : null;
@@ -120,8 +143,22 @@ function diff(oldList, newList){
     }
   }
 
+  const fares = {};
+  for(let i = 0; i < FARE_STATIONS.length; i++){
+    for(let j = i + 1; j < FARE_STATIONS.length; j++){
+      const a = FARE_STATIONS[i], b = FARE_STATIONS[j];
+      fares[`${a.name}|${b.name}`] = await fetchIcFare(a, b);
+    }
+  }
+  const oldFares = (html.match(/const IC_FARES = (\{.*\});/) || [])[1];
+  console.log(`\n== IC運賃 ${Object.keys(fares).length}区間`);
+  for(const [k, v] of Object.entries(fares)){
+    const old = oldFares ? JSON.parse(oldFares)[k] : undefined;
+    if(old !== v) console.log(`  ${k.replace("|", "→")}: ${old ?? "-"} → ${v}円`);
+  }
+
   const outJson = path.join(__dirname, "timetables.json");
-  fs.writeFileSync(outJson, JSON.stringify(result, null, 1));
+  fs.writeFileSync(outJson, JSON.stringify({ ...result, IC_FARES: fares }, null, 1));
   console.log(`\n保存: ${outJson}`);
 
   // 安全策: おかしなデータでページを壊さないよう、怪しければ書き換えずに止める
@@ -154,6 +191,8 @@ function diff(oldList, newList){
       if(!re.test(html)) throw new Error(`${st.constName} がHTML内に無い`);
       html = html.replace(re, () => `const ${st.constName} = ${JSON.stringify(result[st.name]).replace(/,/g, ", ").replace(/:/g, ": ").replace(/"(\d+): (\d+)"/g, '"$1:$2"')};`);
     }
+    if(!/const IC_FARES = \{.*\};/.test(html)) throw new Error("IC_FARES がHTML内に無い");
+    html = html.replace(/const IC_FARES = \{.*\};/, () => `const IC_FARES = ${JSON.stringify(fares)};`);
     fs.writeFileSync(htmlPath, html);
     console.log(`書き換え完了: ${htmlPath}` + (noBackup ? "" : `\nバックアップ: ${backup}`));
   }

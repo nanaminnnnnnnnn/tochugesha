@@ -1294,6 +1294,18 @@
       addNoteLine(item.station + "駅や" + toLabel + "までの所要時間データが無いため、間に合うか計算できません");
     }
 
+    // 電車代(ICカード)。途中下車すると改札で一度精算されるので、区間ごとに分けて出す(合計はしない)。
+    if(!(plan && plan.unreachable)){
+      const fromSt = normalizeStationName(fromInput.value.trim());
+      const destSt = destStationName();
+      [[fromSt, item.station], [item.station, destSt]].forEach(([a, b]) => {
+        // 京都方向に進む区間だけ(目的地より先の駅の候補で、逆向きの運賃を出さない)
+        if(!a || !b || a === b || !(LINE_INDEX[a] < LINE_INDEX[b])) return;
+        const fare = icFare(a, b);
+        if(fare != null) addNoteLine("電車代(IC): " + a + "→" + b + " " + fare.toLocaleString() + "円");
+      });
+    }
+
     decideStatus.textContent = "";
   }
 
@@ -1439,6 +1451,13 @@
   ];
   const LINE_INDEX = {};
   LINE_STATIONS.forEach((s, i) => { LINE_INDEX[s.name] = i; });
+
+  // 駅間のIC運賃(円)。Yahoo!路線情報から scripts/fetch_timetables.js が毎月取り直す。
+  // キーは「京都から遠い駅|京都に近い駅」。JRは往復同額。
+  const IC_FARES = {"摂津富田|高槻":150,"摂津富田|島本":200,"摂津富田|山崎":240,"摂津富田|長岡京":240,"摂津富田|向日町":320,"摂津富田|桂川":320,"摂津富田|西大路":410,"摂津富田|京都":410,"高槻|島本":180,"高槻|山崎":200,"高槻|長岡京":240,"高槻|向日町":320,"高槻|桂川":320,"高槻|西大路":320,"高槻|京都":410,"島本|山崎":150,"島本|長岡京":200,"島本|向日町":200,"島本|桂川":240,"島本|西大路":240,"島本|京都":320,"山崎|長岡京":180,"山崎|向日町":200,"山崎|桂川":200,"山崎|西大路":240,"山崎|京都":240,"長岡京|向日町":180,"長岡京|桂川":180,"長岡京|西大路":200,"長岡京|京都":240,"向日町|桂川":150,"向日町|西大路":180,"向日町|京都":200,"桂川|西大路":150,"桂川|京都":180,"西大路|京都":150};
+  function icFare(a, b){
+    return IC_FARES[a + "|" + b] ?? IC_FARES[b + "|" + a] ?? null;
+  }
 
   // 「山崎駅」のように末尾に「駅」を付けて入力しても、既知の駅名として認識できるようにする。
   function normalizeStationName(raw){
